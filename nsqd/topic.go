@@ -44,8 +44,10 @@ type Topic struct {
 // Topic constructor
 func NewTopic(topicName string, nsqd *NSQD, deleteCallback func(*Topic)) *Topic {
 	t := &Topic{
-		name:              topicName,
-		channelMap:        make(map[string]*Channel),
+		name: topicName,
+		// 存储topic下的channel信息
+		channelMap: make(map[string]*Channel),
+		// 默认内存队列大小10000
 		memoryMsgChan:     make(chan *Message, nsqd.getOpts().MemQueueSize),
 		startChan:         make(chan int, 1),
 		exitChan:          make(chan int),
@@ -54,16 +56,19 @@ func NewTopic(topicName string, nsqd *NSQD, deleteCallback func(*Topic)) *Topic 
 		paused:            0,
 		pauseChan:         make(chan int),
 		deleteCallback:    deleteCallback,
-		idFactory:         NewGUIDFactory(nsqd.getOpts().ID),
+		idFactory:         NewGUIDFactory(nsqd.getOpts().ID), // 消息ID工厂
 	}
+	// 是否是临时Topic
 	if strings.HasSuffix(topicName, "#ephemeral") {
 		t.ephemeral = true
+		// 临时topic的memoryMsgChan满了，新的message不会写入Disk
 		t.backend = newDummyBackendQueue()
 	} else {
 		dqLogf := func(level diskqueue.LogLevel, f string, args ...interface{}) {
 			opts := nsqd.getOpts()
 			lg.Logf(opts.Logger, opts.LogLevel, lg.LogLevel(level), f, args...)
 		}
+		// 内存消息满了，写入磁盘队列
 		t.backend = diskqueue.New(
 			topicName,
 			nsqd.getOpts().DataPath,
@@ -76,6 +81,7 @@ func NewTopic(topicName string, nsqd *NSQD, deleteCallback func(*Topic)) *Topic 
 		)
 	}
 
+	// 将Message分发到topic下的所有channel
 	t.waitGroup.Wrap(t.messagePump)
 
 	t.nsqd.Notify(t, !t.ephemeral)

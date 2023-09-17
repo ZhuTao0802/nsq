@@ -32,6 +32,7 @@ type protocolV2 struct {
 }
 
 func (p *protocolV2) NewClient(conn net.Conn) protocol.Client {
+	// 自增的ClientID
 	clientID := atomic.AddInt64(&p.nsqd.clientIDSequence, 1)
 	return newClientV2(clientID, conn, p.nsqd)
 }
@@ -41,6 +42,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 	var line []byte
 	var zeroTime time.Time
 
+	// 类型断言
 	client := c.(*clientV2)
 
 	// synchronize the startup of messagePump in order
@@ -52,6 +54,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 	go p.messagePump(client, messagePumpStartedChan)
 	<-messagePumpStartedChan
 
+	// 处理客户端发送过来的Command
 	for {
 		if client.HeartbeatInterval > 0 {
 			client.SetReadDeadline(time.Now().Add(client.HeartbeatInterval * 2))
@@ -71,17 +74,21 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 			break
 		}
 
+		// 去除读到数据末尾的“\r\n”
 		// trim the '\n'
 		line = line[:len(line)-1]
 		// optionally trim the '\r'
 		if len(line) > 0 && line[len(line)-1] == '\r' {
 			line = line[:len(line)-1]
 		}
+
+		// 根据空格切分
 		params := bytes.Split(line, separatorBytes)
 
 		p.nsqd.logf(LOG_DEBUG, "PROTOCOL(V2): [%s] %s", client, params)
 
 		var response []byte
+		// 根据prams[0]的值执行对应的命令
 		response, err = p.Exec(client, params)
 		if err != nil {
 			ctx := ""
@@ -102,7 +109,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 			}
 			continue
 		}
-
+		// 将response返回给客户端
 		if response != nil {
 			err = p.Send(client, frameTypeResponse, response)
 			if err != nil {
@@ -769,12 +776,14 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", "PUB insufficient number of parameters")
 	}
 
+	// 读取Topic Name，检查是否合法
 	topicName := string(params[1])
 	if !protocol.IsValidTopicName(topicName) {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_TOPIC",
 			fmt.Sprintf("PUB topic name %q is not valid", topicName))
 	}
 
+	// 读取4字节，获取消息体字节大小
 	bodyLen, err := readLen(client.Reader, client.lenSlice)
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(err, "E_BAD_MESSAGE", "PUB failed to read message body size")
@@ -785,12 +794,15 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 			fmt.Sprintf("PUB invalid message body size %d", bodyLen))
 	}
 
+	// 消息体大于optioins中设定的最大值
 	if int64(bodyLen) > p.nsqd.getOpts().MaxMsgSize {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_MESSAGE",
 			fmt.Sprintf("PUB message too big %d > %d", bodyLen, p.nsqd.getOpts().MaxMsgSize))
 	}
 
+	// 准备指定消息体大小的缓冲区
 	messageBody := make([]byte, bodyLen)
+	// 读取消息
 	_, err = io.ReadFull(client.Reader, messageBody)
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(err, "E_BAD_MESSAGE", "PUB failed to read message body")
@@ -800,6 +812,7 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, err
 	}
 
+	// 从NSQD中获取Topic，如果没有则会创建
 	topic := p.nsqd.GetTopic(topicName)
 	msg := NewMessage(topic.GenerateID(), messageBody)
 	err = topic.PutMessage(msg)

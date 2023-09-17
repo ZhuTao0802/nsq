@@ -47,14 +47,17 @@ type NSQD struct {
 
 	opts atomic.Value
 
+	// 目录锁
 	dl        *dirlock.DirLock
 	isLoading int32
 	isExiting int32
 	errValue  atomic.Value
 	startTime time.Time
 
+	// 存储Topic信息
 	topicMap map[string]*Topic
 
+	// 存储nslookupd的信息
 	lookupPeers atomic.Value
 
 	tcpServer     *tcpServer
@@ -76,6 +79,7 @@ type NSQD struct {
 func New(opts *Options) (*NSQD, error) {
 	var err error
 
+	// disk queue 数据的存储路径
 	dataPath := opts.DataPath
 	if opts.DataPath == "" {
 		cwd, _ := os.Getwd()
@@ -86,31 +90,44 @@ func New(opts *Options) (*NSQD, error) {
 	}
 
 	n := &NSQD{
-		startTime:            time.Now(),
-		topicMap:             make(map[string]*Topic),
-		exitChan:             make(chan int),
+		startTime: time.Now(),
+		// Topic存储 map结构存储
+		topicMap: make(map[string]*Topic),
+		// 退出channel，信号
+		exitChan: make(chan int),
+		// 通知信号
 		notifyChan:           make(chan interface{}),
 		optsNotificationChan: make(chan struct{}, 1),
-		dl:                   dirlock.New(dataPath),
+		// 目录锁初始化，
+		dl: dirlock.New(dataPath),
 	}
+	// 设置NSQD的context对象和取消函数
 	n.ctx, n.ctxCancel = context.WithCancel(context.Background())
+	// 创建HTTP client
 	httpcli := http_api.NewClient(nil, opts.HTTPClientConnectTimeout, opts.HTTPClientRequestTimeout)
 	n.ci = clusterinfo.New(n.logf, httpcli)
 
+	// 存储nslookupd的信息
 	n.lookupPeers.Store([]*lookupPeer{})
 
+	// 存储options信息到nsqd对象中
 	n.swapOpts(opts)
+	// 存储err信息
 	n.errValue.Store(errStore{})
 
+	// 获取文件目录锁
 	err = n.dl.Lock()
 	if err != nil {
+		// 加锁失败
 		return nil, fmt.Errorf("failed to lock data-path: %v", err)
 	}
 
+	// 检查options中的参数MaxDeflateLevel是否越界
 	if opts.MaxDeflateLevel < 1 || opts.MaxDeflateLevel > 9 {
 		return nil, errors.New("--max-deflate-level must be [1,9]")
 	}
 
+	// 校验options中ID参数是否越界
 	if opts.ID < 0 || opts.ID >= 1024 {
 		return nil, errors.New("--node-id must be [0,1024)")
 	}
@@ -119,6 +136,7 @@ func New(opts *Options) (*NSQD, error) {
 		opts.TLSRequired = TLSRequired
 	}
 
+	// TLS校验
 	tlsConfig, err := buildTLSConfig(opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build TLS config - %s", err)
@@ -134,14 +152,18 @@ func New(opts *Options) (*NSQD, error) {
 		}
 	}
 
+	// 打印日志
 	n.logf(LOG_INFO, version.String("nsqd"))
 	n.logf(LOG_INFO, "ID: %d", opts.ID)
 
+	// 创建TCP server
 	n.tcpServer = &tcpServer{nsqd: n}
+	// 创建TCP listener
 	n.tcpListener, err = net.Listen(util.TypeOfAddr(opts.TCPAddress), opts.TCPAddress)
 	if err != nil {
 		return nil, fmt.Errorf("listen (%s) failed - %s", opts.TCPAddress, err)
 	}
+	// 创建HTTP Listener
 	if opts.HTTPAddress != "" {
 		n.httpListener, err = net.Listen(util.TypeOfAddr(opts.HTTPAddress), opts.HTTPAddress)
 		if err != nil {
@@ -243,7 +265,9 @@ func (n *NSQD) GetStartTime() time.Time {
 	return n.startTime
 }
 
+// NSQD的启动方法
 func (n *NSQD) Main() error {
+	// 退出程序的信号，不带缓冲区
 	exitCh := make(chan error)
 	var once sync.Once
 	exitFunc := func(err error) {
@@ -255,15 +279,22 @@ func (n *NSQD) Main() error {
 		})
 	}
 
+	// 异步执行封装的这个func函数
 	n.waitGroup.Wrap(func() {
-		exitFunc(protocol.TCPServer(n.tcpListener, n.tcpServer, n.logf))
+		//exitFunc(protocol.TCPServer(n.tcpListener, n.tcpServer, n.logf))
+		// 创建TCPServer，并且TCPServer实现了TCPHandler接口的Handle(net.Conn)方法
+		// 正常情况下，下面的err不会返回，内部是个for循环，listener循环获取连接，阻塞
+		err := protocol.TCPServer(n.tcpListener, n.tcpServer, n.logf)
+		exitCh <- err
 	})
+	// Http Server，同样的，内部for循环，listener循环获取连接信息，会阻塞，一般情况下不会有err给到exitCh
 	if n.httpListener != nil {
 		httpServer := newHTTPServer(n, false, n.getOpts().TLSRequired == TLSRequired)
 		n.waitGroup.Wrap(func() {
 			exitFunc(http_api.Serve(n.httpListener, httpServer, "HTTP", n.logf))
 		})
 	}
+	// https Server
 	if n.httpsListener != nil {
 		httpsServer := newHTTPServer(n, true, true)
 		n.waitGroup.Wrap(func() {
@@ -271,17 +302,21 @@ func (n *NSQD) Main() error {
 		})
 	}
 
+	// 维护channel中的延时队列和等待消息确认队列
 	n.waitGroup.Wrap(n.queueScanLoop)
+	// 连接到nslookupd
 	n.waitGroup.Wrap(n.lookupLoop)
 	if n.getOpts().StatsdAddress != "" {
 		n.waitGroup.Wrap(n.statsdLoop)
 	}
 
+	// 阻塞，直至exitChan中有err信息
 	err := <-exitCh
 	return err
 }
 
 // Metadata is the collection of persistent information about the current NSQD.
+// nsqd.dat文件中存储的JSON数据
 type Metadata struct {
 	Topics  []TopicMetadata `json:"topics"`
 	Version string          `json:"version"`
@@ -329,11 +364,14 @@ func writeSyncFile(fn string, data []byte) error {
 }
 
 func (n *NSQD) LoadMetadata() error {
+	// 加载元数据，
 	atomic.StoreInt32(&n.isLoading, 1)
 	defer atomic.StoreInt32(&n.isLoading, 0)
 
+	// 返回 options.DATa Path + "nsqd.dat"
 	fn := newMetadataFile(n.getOpts())
 
+	// 读取nsqd.dat的数据
 	data, err := readOrEmpty(fn)
 	if err != nil {
 		return err
@@ -472,6 +510,7 @@ func (n *NSQD) Exit() {
 // to return a pointer to a Topic object (potentially new)
 func (n *NSQD) GetTopic(topicName string) *Topic {
 	// most likely we already have this topic, so try read lock first
+	// 读到直接返回
 	n.RLock()
 	t, ok := n.topicMap[topicName]
 	n.RUnlock()
@@ -479,8 +518,9 @@ func (n *NSQD) GetTopic(topicName string) *Topic {
 		return t
 	}
 
+	// 加了写锁之后，double check
 	n.Lock()
-
+	// double check
 	t, ok = n.topicMap[topicName]
 	if ok {
 		n.Unlock()
@@ -489,6 +529,8 @@ func (n *NSQD) GetTopic(topicName string) *Topic {
 	deleteCallback := func(t *Topic) {
 		n.DeleteExistingTopic(t.name)
 	}
+
+	// 新建一个Topic
 	t = NewTopic(topicName, n, deleteCallback)
 	n.topicMap[topicName] = t
 

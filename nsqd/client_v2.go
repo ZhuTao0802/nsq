@@ -188,15 +188,16 @@ func newClientV2(id int64, conn net.Conn, nsqd *NSQD) *clientV2 {
 	}
 
 	c := &clientV2{
+		// 自增的nsqd.clientIDSequence
 		ID:   id,
 		nsqd: nsqd,
 
 		Conn: conn,
 
-		Reader: bufio.NewReaderSize(conn, defaultBufferSize),
-		Writer: bufio.NewWriterSize(conn, defaultBufferSize),
+		Reader: bufio.NewReaderSize(conn, defaultBufferSize), // 16KB
+		Writer: bufio.NewWriterSize(conn, defaultBufferSize), // 16KB
 
-		OutputBufferSize:    defaultBufferSize,
+		OutputBufferSize:    defaultBufferSize, // 16KB
 		OutputBufferTimeout: nsqd.getOpts().OutputBufferTimeout,
 
 		MsgTimeout: nsqd.getOpts().MsgTimeout,
@@ -206,8 +207,8 @@ func newClientV2(id int64, conn net.Conn, nsqd *NSQD) *clientV2 {
 		ReadyStateChan: make(chan int, 1),
 		ExitChan:       make(chan int),
 		ConnectTime:    time.Now(),
-		State:          stateInit,
-
+		// 初始化状态
+		State:    stateInit,
 		ClientID: identifier,
 		Hostname: identifier,
 
@@ -215,6 +216,7 @@ func newClientV2(id int64, conn net.Conn, nsqd *NSQD) *clientV2 {
 		IdentifyEventChan: make(chan identifyEvent, 1),
 
 		// heartbeats are client configurable but default to 30s
+		// 心跳间隔，客户端超时时间的一般，默认是30秒，通过客户端的超时时间间接配置
 		HeartbeatInterval: nsqd.getOpts().ClientTimeout / 2,
 
 		pubCounts: make(map[string]uint64),

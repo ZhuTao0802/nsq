@@ -9,6 +9,7 @@ import (
 	"syscall"
 )
 
+// 目录所
 type DirLock struct {
 	dir string
 	f   *os.File
@@ -26,6 +27,7 @@ func (l *DirLock) Lock() error {
 		return err
 	}
 	l.f = f
+	// 系统调用文件锁
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err != nil {
 		return fmt.Errorf("cannot flock directory %s - %s (possibly in use by another instance of nsqd)", l.dir, err)
