@@ -187,6 +187,7 @@ func (p *protocolV2) Exec(client *clientV2, params [][]byte) ([]byte, error) {
 		return p.RDY(client, params)
 	case bytes.Equal(params[0], []byte("REQ")):
 		return p.REQ(client, params)
+	// 生产者发布
 	case bytes.Equal(params[0], []byte("PUB")):
 		return p.PUB(client, params)
 	case bytes.Equal(params[0], []byte("MPUB")):
@@ -197,6 +198,7 @@ func (p *protocolV2) Exec(client *clientV2, params [][]byte) ([]byte, error) {
 		return p.NOP(client, params)
 	case bytes.Equal(params[0], []byte("TOUCH")):
 		return p.TOUCH(client, params)
+	// 消费者订阅
 	case bytes.Equal(params[0], []byte("SUB")):
 		return p.SUB(client, params)
 	case bytes.Equal(params[0], []byte("CLS")):
@@ -587,7 +589,13 @@ func (p *protocolV2) CheckAuth(client *clientV2, cmd, topicName, channelName str
 	return nil
 }
 
+/*
+SUB <topic_name> <channel_name>\n
+<topic_name> - a valid string (optionally having #ephemeral suffix)
+<channel_name> - a valid string (optionally having #ephemeral suffix)
+*/
 func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
+	// 判断client状态
 	if atomic.LoadInt32(&client.State) != stateInit {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", "cannot SUB in current state")
 	}
@@ -600,12 +608,14 @@ func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", "SUB insufficient number of parameters")
 	}
 
+	// Topic名称
 	topicName := string(params[1])
 	if !protocol.IsValidTopicName(topicName) {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_TOPIC",
 			fmt.Sprintf("SUB topic name %q is not valid", topicName))
 	}
 
+	// channel 名称
 	channelName := string(params[2])
 	if !protocol.IsValidChannelName(channelName) {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_CHANNEL",
@@ -621,13 +631,17 @@ func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
 	// Avoid adding a client to an ephemeral channel / topic which has started exiting.
 	var channel *Channel
 	for i := 1; ; i++ {
+		// 获取Topic
 		topic := p.nsqd.GetTopic(topicName)
+		// 获取Topic下的指定Channel
 		channel = topic.GetChannel(channelName)
+		// 将client添加到channel，一个channel可以对应多client
 		if err := channel.AddClient(client.ID, client); err != nil {
 			return nil, protocol.NewFatalClientErr(err, "E_SUB_FAILED", "SUB failed "+err.Error())
 		}
-
+		// 临时channel并且channel正在退出 或者topic是临时的，并且正在退出topic
 		if (channel.ephemeral && channel.Exiting()) || (topic.ephemeral && topic.Exiting()) {
+			// channel移除这个client
 			channel.RemoveClient(client.ID)
 			if i < 2 {
 				time.Sleep(100 * time.Millisecond)
@@ -637,7 +651,9 @@ func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
 		}
 		break
 	}
+	// 更新client 的状态，为已订阅状态
 	atomic.StoreInt32(&client.State, stateSubscribed)
+	// 一个client只会关联一个channel
 	client.Channel = channel
 	// update message pump
 	client.SubEventChan <- channel
@@ -769,6 +785,12 @@ func (p *protocolV2) NOP(client *clientV2, params [][]byte) ([]byte, error) {
 	return nil, nil
 }
 
+/*
+PUB <topic_name>\n
+[ 4-byte size in bytes ][ N-byte binary data ]
+
+<topic_name> - a valid string (optionally having #ephemeral suffix)
+*/
 func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 	var err error
 
@@ -814,6 +836,7 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 
 	// 从NSQD中获取Topic，如果没有则会创建
 	topic := p.nsqd.GetTopic(topicName)
+	// 创建消息 id + body + timestamp
 	msg := NewMessage(topic.GenerateID(), messageBody)
 	err = topic.PutMessage(msg)
 	if err != nil {

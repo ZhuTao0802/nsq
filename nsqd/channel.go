@@ -82,9 +82,11 @@ func NewChannel(topicName string, channelName string, nsqd *NSQD,
 		clients:        make(map[int64]Consumer),
 		deleteCallback: deleteCallback,
 		nsqd:           nsqd,
-		ephemeral:      strings.HasSuffix(channelName, "#ephemeral"),
+		// 是否是暂时的channel
+		ephemeral: strings.HasSuffix(channelName, "#ephemeral"),
 	}
 	// avoid mem-queue if size == 0 for more consistent ordering
+	// 如果内存队列大于0，或者c是一个临时的channel
 	if nsqd.getOpts().MemQueueSize > 0 || c.ephemeral {
 		c.memoryMsgChan = make(chan *Message, nsqd.getOpts().MemQueueSize)
 	}
@@ -294,6 +296,7 @@ func (c *Channel) PutMessage(m *Message) error {
 	if c.Exiting() {
 		return errors.New("exiting")
 	}
+	// 优先放到channel的memMsgChan中，满了的话，放到channel的backend中
 	err := c.put(m)
 	if err != nil {
 		return err
@@ -457,6 +460,7 @@ func (c *Channel) StartInFlightTimeout(msg *Message, clientID int64, timeout tim
 	return nil
 }
 
+// 延时发送的消息存储在channel的优先级队列中
 func (c *Channel) StartDeferredTimeout(msg *Message, timeout time.Duration) error {
 	absTs := time.Now().Add(timeout).UnixNano()
 	item := &pqueue.Item{Value: msg, Priority: absTs}

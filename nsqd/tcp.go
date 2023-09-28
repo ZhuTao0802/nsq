@@ -24,7 +24,7 @@ type tcpServer struct {
 	conns sync.Map
 }
 
-// TCPServer对连接的处理
+// TCPServer对连接的处理，这是个异步处理方法，调用者通过listener.Accept()方法循环获取连接信息
 func (p *tcpServer) Handle(conn net.Conn) {
 	p.nsqd.logf(LOG_INFO, "TCP: new client(%s)", conn.RemoteAddr())
 
@@ -56,6 +56,7 @@ func (p *tcpServer) Handle(conn net.Conn) {
 		return
 	}
 
+	// 创建客户端对象，并保存在tcpServer中的conns中
 	client := prot.NewClient(conn)
 	// 存储客户端信息
 	p.conns.Store(conn.RemoteAddr(), client)
@@ -65,7 +66,9 @@ func (p *tcpServer) Handle(conn net.Conn) {
 		p.nsqd.logf(LOG_ERROR, "client(%s) - %s", conn.RemoteAddr(), err)
 	}
 
+	// 删除客户端信息
 	p.conns.Delete(conn.RemoteAddr())
+	// 关闭客户端信息
 	client.Close()
 }
 

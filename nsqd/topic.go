@@ -18,6 +18,7 @@ type Topic struct {
 	messageCount uint64
 	messageBytes uint64
 
+	// 读写锁
 	sync.RWMutex
 
 	name              string
@@ -110,6 +111,7 @@ func (t *Topic) GetChannel(channelName string) *Channel {
 	t.Unlock()
 
 	if isNew {
+		// 新创建的channel
 		// update messagePump state
 		select {
 		case t.channelUpdateChan <- 1:
@@ -122,11 +124,15 @@ func (t *Topic) GetChannel(channelName string) *Channel {
 
 // this expects the caller to handle locking
 func (t *Topic) getOrCreateChannel(channelName string) (*Channel, bool) {
+	// 获取topic下指定channel
 	channel, ok := t.channelMap[channelName]
 	if !ok {
+		// topic下没有这个channel
+		// 删除存在的channel
 		deleteCallback := func(c *Channel) {
 			t.DeleteExistingChannel(c.name)
 		}
+		// 新建一个channel
 		channel = NewChannel(t.name, channelName, t.nsqd, deleteCallback)
 		t.channelMap[channelName] = channel
 		t.nsqd.logf(LOG_INFO, "TOPIC(%s): new channel(%s)", t.name, channel.name)
@@ -186,6 +192,7 @@ func (t *Topic) DeleteExistingChannel(channelName string) error {
 func (t *Topic) PutMessage(m *Message) error {
 	t.RLock()
 	defer t.RUnlock()
+	// 判断topic是否退出，退出则返回错误
 	if atomic.LoadInt32(&t.exitFlag) == 1 {
 		return errors.New("exiting")
 	}
@@ -193,7 +200,9 @@ func (t *Topic) PutMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
+	// topic消息数量 + 1
 	atomic.AddUint64(&t.messageCount, 1)
+	// topic消息字节数更新
 	atomic.AddUint64(&t.messageBytes, uint64(len(m.Body)))
 	return nil
 }
@@ -223,6 +232,7 @@ func (t *Topic) PutMessages(msgs []*Message) error {
 	return nil
 }
 
+// 将消息保存到Topic中
 func (t *Topic) put(m *Message) error {
 	// If mem-queue-size == 0, avoid memory chan, for more consistent ordering,
 	// but try to use memory chan for deferred messages (they lose deferred timer
@@ -235,6 +245,7 @@ func (t *Topic) put(m *Message) error {
 			break // write to backend
 		}
 	}
+	// 将数据写到后端，例如disk-queue
 	err := writeMessageToBackend(m, t.backend)
 	t.nsqd.SetHealth(err)
 	if err != nil {
@@ -252,6 +263,7 @@ func (t *Topic) Depth() int64 {
 
 // messagePump selects over the in-memory and backend queue and
 // writes messages to every channel for this topic
+// 将Topic的内存以及磁盘下的消息发送给Topic下的所有channel
 func (t *Topic) messagePump() {
 	var msg *Message
 	var buf []byte
@@ -274,10 +286,12 @@ func (t *Topic) messagePump() {
 		break
 	}
 	t.RLock()
+	// 遍历获取topic下的所有channel
 	for _, c := range t.channelMap {
 		chans = append(chans, c)
 	}
 	t.RUnlock()
+	// channel存在并且topic没有暂停
 	if len(chans) > 0 && !t.IsPaused() {
 		memoryMsgChan = t.memoryMsgChan
 		backendChan = t.backend.ReadChan()
@@ -286,13 +300,16 @@ func (t *Topic) messagePump() {
 	// main message loop
 	for {
 		select {
+		// 内存MsgChan中有数据，给到msg
 		case msg = <-memoryMsgChan:
+		// 后端channel如disk queue数据给到buf
 		case buf = <-backendChan:
 			msg, err = decodeMessage(buf)
 			if err != nil {
 				t.nsqd.logf(LOG_ERROR, "failed to decode message - %s", err)
 				continue
 			}
+		// 有新channel加入，重新获取topic中的channel信息
 		case <-t.channelUpdateChan:
 			chans = chans[:0]
 			t.RLock()
@@ -308,6 +325,7 @@ func (t *Topic) messagePump() {
 				backendChan = t.backend.ReadChan()
 			}
 			continue
+		// topic下的channel被暂停
 		case <-t.pauseChan:
 			if len(chans) == 0 || t.IsPaused() {
 				memoryMsgChan = nil
@@ -322,6 +340,7 @@ func (t *Topic) messagePump() {
 		}
 
 		for i, channel := range chans {
+			// 拷贝
 			chanMsg := msg
 			// copy the message because each channel
 			// needs a unique instance but...
@@ -330,12 +349,15 @@ func (t *Topic) messagePump() {
 			if i > 0 {
 				chanMsg = NewMessage(msg.ID, msg.Body)
 				chanMsg.Timestamp = msg.Timestamp
+				// 延时发送
 				chanMsg.deferred = msg.deferred
 			}
+			// 延时发送消息
 			if chanMsg.deferred != 0 {
 				channel.PutMessageDeferred(chanMsg, chanMsg.deferred)
 				continue
 			}
+			// 非延时消息，直接写入channel（memory或者backend）
 			err := channel.PutMessage(chanMsg)
 			if err != nil {
 				t.nsqd.logf(LOG_ERROR,

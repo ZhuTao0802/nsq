@@ -564,6 +564,7 @@ func (n *NSQD) GetTopic(topicName string) *Topic {
 	}
 
 	// now that all channels are added, start topic messagePump
+	// 将topic中的startChan设置为1，表示topic已经启动
 	t.Start()
 	return t
 }
